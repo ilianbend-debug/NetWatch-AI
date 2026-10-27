@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NetWatch AI</title>
+<style>
+:root{--bg:#0e1626;--panel:#15223a;--line:#263a5e;--text:#dce6f5;--dim:#8a9bb8;--trace:#7fd6ff;--amber:#ffb020;--red:#ff6b6b}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 "Segoe UI",system-ui,sans-serif}
+header{display:flex;justify-content:space-between;align-items:baseline;padding:18px 24px 0}
+h1{font-size:20px;margin:0;font-weight:600}
+#status{color:var(--dim);font-size:13px}
+.scope{margin:14px 24px 0;background:var(--panel);border:1px solid var(--line);border-radius:6px;position:relative}
+canvas{display:block;width:100%;height:230px}
+.big{position:absolute;left:18px;top:12px;pointer-events:none}
+.big b{font-size:44px;font-weight:300;letter-spacing:-1px}
+.big span{color:var(--dim);margin-left:8px}
+.big div{color:var(--dim);font-size:13px}
+main{display:grid;grid-template-columns:minmax(0,3fr) minmax(0,2fr);gap:16px;padding:16px 24px 24px}
+@media(max-width:900px){main{grid-template-columns:1fr}}
+section{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:14px 16px;min-width:0}
+h2{font-size:15px;margin:0 0 10px;font-weight:600}
+.wrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font:12.5px ui-monospace,Consolas,monospace}
+th{text-align:left;color:var(--dim);font-weight:400;padding:3px 8px 6px 0}
+td{padding:3px 8px 3px 0;white-space:nowrap;border-top:1px solid #1d2e4d}
+.alert{border-left:3px solid var(--amber);padding:6px 0 6px 12px;margin-bottom:12px}
+.alert.high{border-color:var(--red)}
+.alert h3{margin:0;font-size:14px;font-weight:600}
+.alert p{margin:2px 0 6px;color:var(--dim);font-size:13px;overflow-wrap:anywhere}
+.alert .when{color:var(--dim);font-size:12px}
+.ai{margin-top:6px;padding:8px 10px;background:#0e1a2f;border-radius:4px;font-size:13px;white-space:pre-wrap}
+button{background:transparent;color:var(--trace);border:1px solid var(--trace);border-radius:4px;padding:4px 10px;font:inherit;font-size:13px;cursor:pointer}
+button:hover{background:#7fd6ff22}
+button:focus-visible{outline:2px solid var(--trace);outline-offset:2px}
+.empty{color:var(--dim);font-size:13px}
+.bar{display:flex;align-items:center;gap:8px;font:12.5px ui-monospace,Consolas,monospace;margin:3px 0}
+.bar i{display:block;height:6px;background:var(--trace);border-radius:3px;min-width:2px}
+.bar em{font-style:normal;color:var(--dim);margin-left:auto}
+.col{display:flex;flex-direction:column;gap:16px;min-width:0}
+</style>
+</head>
+<body>
+<header><h1>NetWatch AI</h1><div id="status">Connexion…</div></header>
+
+<div class="scope">
+  <canvas id="scope" aria-label="Paquets par seconde en direct"></canvas>
+  <div class="big"><b id="pps">0</b><span>paquets par seconde</span><div id="totals"></div></div>
+</div>
+
+<main>
+  <section>
+    <h2>Paquets en direct</h2>
+    <div class="wrap">
+      <table>
+        <thead><tr><th>Heure</th><th>Proto</th><th>Source</th><th>Destination</th><th>Octets</th><th>Info</th></tr></thead>
+        <tbody id="packets"></tbody>
+      </table>
+    </div>
+  </section>
+  <div class="col">
+    <section>
+      <h2>Alertes</h2>
+      <div id="alerts"><div class="empty">Aucune alerte pour l'instant. Tout est calme.</div></div>
+    </section>
+    <section>
+      <h2>Protocoles</h2><div id="protos"></div>
+      <h2 style="margin-top:14px">Plus gros émetteurs</h2><div id="talkers"></div>
+    </section>
+  </div>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const HIST = 120, hist = [], explain = {};
+let lastAlerts = [];
+
+const hhmmss = ts => new Date(ts * 1000).toLocaleTimeString("fr-FR");
+function fmtBytes(n){ if(n<1024) return n+" o"; if(n<1048576) return (n/1024).toFixed(1)+" Ko"; if(n<1073741824) return (n/1048576).toFixed(1)+" Mo"; return (n/1073741824).toFixed(2)+" Go"; }
+const getJSON = async (u, o) => (await fetch(u, o)).json();
+
+function drawScope(){
+  const c = $("#scope"), dpr = window.devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
+  c.width = w * dpr; c.height = h * dpr;
+  const x = c.getContext("2d"); x.scale(dpr, dpr); x.clearRect(0, 0, w, h);
+  x.strokeStyle = "#1e2f4f"; x.lineWidth = 1;
+  for(let i = 1; i < 6; i++){ const y = h * i / 6; x.beginPath(); x.moveTo(0, y); x.lineTo(w, y); x.stroke(); }
+  if(!hist.length) return;
+  const max = Math.max(10, ...hist) * 1.2, step = w / (HIST - 1);
+  x.beginPath();
+  hist.forEach((v, i) => {
+    const px = w - (hist.length - 1 - i) * step, py = h - 10 - (v / max) * (h - 60);
+    i ? x.lineTo(px, py) : x.moveTo(px, py);
+  });
+  x.strokeStyle = "#7fd6ff"; x.lineWidth = 2; x.stroke();
+}
+
+function renderPackets(list){
+  $("#packets").innerHTML = list.map(p =>
+    `<tr><td>${hhmmss(p.ts)}</td><td>${esc(p.proto)}</td><td>${esc(p.src)}${p.sport ? ":" + p.sport : ""}</td>` +
+    `<td>${esc(p.dst)}${p.dport ? ":" + p.dport : ""}</td><td>${p.size}</td><td>${esc(p.info || p.flags)}</td></tr>`).join("");
+}
+
+function renderAlerts(list){
+  lastAlerts = list;
+  if(!list.length){ $("#alerts").innerHTML = '<div class="empty">Aucune alerte pour l\'instant. Tout est calme.</div>'; return; }
+  $("#alerts").innerHTML = list.slice(0, 15).map(a => `
+    <div class="alert ${esc(a.severity)}">
+      <div class="when">${hhmmss(a.ts)}</div>
+      <h3>${esc(a.title)}</h3>
+      <p>${esc(a.detail)}</p>
+      ${explain[a.id] ? `<div class="ai">${esc(explain[a.id])}</div>` : `<button data-explain="${a.id}">Expliquer avec l'IA</button>`}
+    </div>`).join("");
+}
+
+function renderBars(el, entries, fmt){
+  const max = Math.max(1, ...entries.map(e => e[1]));
+  el.innerHTML = entries.map(([k, v]) =>
+    `<div class="bar"><span>${esc(k)}</span><i style="width:${Math.round(v / max * 90)}px"></i><em>${fmt(v)}</em></div>`).join("");
+}
+
+async function tick(){
+  try{
+    const [s, p, a] = await Promise.all([getJSON("/api/stats"), getJSON("/api/packets"), getJSON("/api/alerts")]);
+    hist.push(s.pps); if(hist.length > HIST) hist.shift();
+    $("#pps").textContent = s.pps;
+    $("#totals").textContent = `${s.total_packets} paquets, ${fmtBytes(s.total_bytes)} depuis le lancement`;
+    $("#status").textContent = "En direct";
+    renderPackets(p); renderAlerts(a);
+    renderBars($("#protos"), Object.entries(s.protocols), v => v);
+    renderBars($("#talkers"), s.talkers, fmtBytes);
+    drawScope();
+  }catch(e){ $("#status").textContent = "Serveur injoignable"; }
+}
+
+document.addEventListener("click", async e => {
+  const b = e.target.closest("[data-explain]"); if(!b) return;
+  const id = Number(b.dataset.explain);
+  explain[id] = "Analyse en cours…"; renderAlerts(lastAlerts);
+  try{ explain[id] = (await getJSON("/api/explain/" + id, {method: "POST"})).text; }
+  catch(err){ explain[id] = "Impossible de joindre le serveur."; }
+  renderAlerts(lastAlerts);
+});
+
+window.addEventListener("resize", drawScope);
+setInterval(tick, 1000); tick();
+</script>
+</body>
+</html>
